@@ -1,0 +1,175 @@
+section .rodata
+    align 16
+    maskrow1: db 0x03,0xFF,0x07,0xFF,0x0B,0xFF,0xFF,0xFF,   0x07,0xFF,0x0B,0xFF,0x0F,0xFF,0xFF,0xFF
+    maskrow2: db 0x07,0xFF,0x0B,0xFF,0xFF,0xFF,0xFF,0xFF,   0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF
+    pixelesNegros: dd 0xFF000000, 0xFF000000, 0xFF000000, 0xFF000000
+
+section .text
+
+global Sharpen_asm
+Sharpen_asm:
+
+;; C: void Sharpen_asm (uint8_t *src, uint8_t *dst, int width, int height, int src_row_size, int dst_row_size);
+
+
+    ;; pruebas preliminares. borrar...
+    ;; ;; test escribir primer pixel rojo
+    ;; MOV EAX, 0xFFFF0000 ; ARGB 32 al leerlo de mem.
+    ;; MOV [RSI], EAX; primer pixel
+    ;; MOV [RSI + 4*RDX], EAX
+    
+    ;; test escribir primer pixel rojo usando xmm0
+    ;; MOV EAX, 0xFFFF0000 ; guarda alreves! little endian: || B:00 G:00 R:FF A:FF ||
+    ;; MOVDQU XMM0, [RDI]
+    ;; PINSRD XMM0, EAX, 0 ; | Red | same | same | same | ; baja| px0 | px1 | px2 | px3 |alta
+    ;; MOVDQU [RSI], XMM0
+
+    PUSH R12
+    PUSH R13   
+
+
+
+    MOVDQA XMM9, [pixelesNegros]; se usan para los bordes de la imagen.
+
+    MOV R13, RDI; lo guardo para usarlo entre saltos de filas
+    MOV R12, RSI; lo guardo para usarlo entre saltos de filas
+
+    ; pintar fila 1 de negro:
+
+    MOV R11, RDX
+    SHR R11, 2; de a 4 pixeles
+.loopNegro:
+    MOVDQU [RSI], XMM9
+    ADD RSI, 16
+    DEC R11
+    CMP R11, 0
+    JNE .loopNegro
+
+    ; restauro RSI
+    MOV RSI, R12
+
+    XOR R10, R10; para frenar iteracion total
+    MOV R10, RCX;
+    SUB R10, 2; terminar en height - 2
+
+.loopNewRow:
+
+    XOR R11, R11; para frenar iteracion de fila
+    MOV R11, RDX
+    SHR R11, 1
+    SUB R11, 1 ; terminar en width/2 - 1 
+
+    ; pixel negro inicio de row:
+    MOVD [RSI], XMM9
+
+.loopRow:
+
+    MOVDQU XMM0, [RDI]
+    MOVDQU XMM1, [RDI + R9]
+    MOVDQU XMM2, [RDI + 2*R9]
+    PXOR XMM8, XMM8; aca voy a guardar resultados temporales...
+    XOR RCX, RCX; iterador sobre 4 canales
+    MOV RCX, 4
+    MOVDQA XMM3, [maskrow1] ; selecciono 1 canal: alfa, rojo, verde, azul, asi itero... || BGRA ||
+    MOVDQA XMM4, [maskrow2] ; selecciono 1 canal
+
+
+
+.loopCanales:
+    ; voy a usar representaciones little endian. A no confundirse ;D
+
+    ; copia datos 
+    MOVDQU XMM5, XMM0
+    MOVDQU XMM6, XMM1
+    MOVDQU XMM7, XMM2
+
+    ; filtra canal actual de los pixeles. y agrego un byte entre pixeles para tener rango de word en las sumas.
+    PSHUFB XMM5, XMM3; me queda | r 0 r 0 r 0 0 0 r 0 r 0 r 0 0 0 | r de los pixeles 0 1 2 - 1 2 3 - respec de row0
+    PSHUFB XMM6, XMM3; me queda | r 0 r 0 r 0 0 0 r 0 r 0 r 0 0 0 | r de los pixeles 0 1 2 - 1 2 3 - respec de row1
+    PSHUFB XMM7, XMM3; me queda | r 0 r 0 r 0 0 0 r 0 r 0 r 0 0 0 | r de los pixeles 0 1 2 - 1 2 3 - respec de row2
+
+    ; suma todos los elementos
+    PADDUSW XMM5, XMM6
+    PADDUSW XMM5, XMM7 ; me queda | r+r+r | r+r+r | r+r+r | 0 | r+r+r | r+r+r | r+r+r | 0 | como Word en vez de Byte.
+    PHADDW XMM5, XMM5; 
+    PHADDW XMM5, XMM5; | 9r | 9r | * | * | * | * | * | * |
+
+    ; filtra canal actual de pixeles centrales.
+    MOVDQU XMM6, XMM1
+    PSHUFB XMM6, XMM4; me queda | r 0 r 0 0 0 0 0 0 0 0 0 0 0 0 0 | r de los pixeles 2 y  3 respec de r2
+    MOVDQU XMM7, XMM6; copio
+    
+    ; multiplico por 10 (-1 lo meti en la suma anterior: otra mascara vs 1 shift...)
+    PSLLW XMM6, 3; * 8
+    PSLLW XMM7, 1; * 2
+    PADDUSW XMM6, XMM7; me queda | 10*r | 10*r | 0 | 0 | 0 | 0 | 0 | 0 | como words
+
+    ; resto las sumas para obtener la cuenta de interes
+    PSUBUSW XMM6, XMM5; deberia quedar | 10*r - 9r | 10*r -9r | 0 | 0 | 0 | 0 | 0 | 0 | por la saturacion quedan 0s
+    MOVDQU XMM7, XMM6; hago copia
+    ; USO SHIFTS PARA ACOMODAR donde quiero
+    PSLLDQ XMM6, 14
+    PSRLDQ XMM6, 14
+    PSRLDQ XMM7, 2    
+    PSLLDQ XMM7, 8
+    PSLLQ XMM8, 16;
+    PADDUSW XMM8, XMM6; |9r - "8" r | ? | ? | ? | ? | ? | ? | ? | donde en ? voy guardando otros canales...
+    PADDUSW XMM8, XMM7; |9r - "8" r | ? | ? | ? | 9r - "8" r | ? | ? | ? | donde en ? voy guardando otros canales...
+
+    ; revisa si falta siguiente canal
+    DEC RCX
+    CMP RCX, 0
+    JE .finCanales
+    
+    ; preparar siguiente canal
+    PSLLD XMM0, 8
+    PSLLD XMM1, 8
+    PSLLD XMM2, 8
+    JMP .loopCanales
+
+.finCanales:
+
+    ; en este punto tengo 8 words del tipo |9r - "8" c | para ambos pixeles. Falta empaquetar a Byte con saturar.
+    PACKUSWB XMM8, XMM8;
+
+    ; paso 2 pixeles centrales.
+    MOVQ [RSI + R9 + 4], XMM8; desalineado(?)
+
+    ; sigo con siguientes 2 pixeles
+    ADD RDI, 8
+    ADD RSI, 8
+    DEC R11
+    CMP R11, 0
+    JNE .loopRow
+    ; pixel negro fin de row:
+    MOVD [RSI + 4], XMM9
+    JMP .sigFila
+
+.sigFila:
+    ADD R13, R9
+    MOV RDI, R13
+    ADD R12, R9
+    MOV RSI, R12
+    DEC R10
+    CMP R10, 0
+    JNE .loopNewRow
+    ; pixel negro inicio anteultima row:
+    MOVD [RSI], XMM9
+    ; pixel negro fin anteultima row:
+    MOVD [RSI + R9 - 4], XMM9
+
+    ; pintar fila final de negro:
+    MOV R11, RDX
+    SHR R11, 2; de a 4 pixeles
+    ADD RSI, R9
+.loopNegro2:
+    MOVDQU [RSI], XMM9
+    ADD RSI, 16
+    DEC R11
+    CMP R11, 0
+    JNE .loopNegro2
+
+.fin:
+    POP R13
+    POP R12
+    ret

@@ -1,0 +1,142 @@
+%define HORIZONTAL_OFFSET 32
+%define VERTICAL_OFFSET 8
+
+section .rodata
+    align 16
+    pixelesNegros: dd 0xFF000000, 0xFF000000, 0xFF000000, 0xFF000000
+
+section .text
+
+global Offset_asm
+Offset_asm:
+
+;; void Offset_asm (uint8_t *src, uint8_t *dst, int width, int height, int src_row_size, int dst_row_size);
+
+    PUSH R12
+    PUSH R13   
+
+    MOVDQA XMM9, [pixelesNegros]; se usan para los bordes de la imagen.
+
+    MOV R13, RSI; lo guardo para restaurarlo despues. de pintar de negro.
+
+    ;; pintar filas 1-8 de negro:
+
+    MOV R10, 8; contador de filas
+
+.loopNewFilaNegro:
+    MOV R11, RDX; contador de columnas (de a 4 pixeles)
+    SHR R11, 2; de a 4 pixeles
+
+.loopFilaNegro:
+    MOVDQU [RSI], XMM9
+
+    ; avanzar columna
+    ADD RSI, 16
+    DEC R11
+    CMP R11, 0
+    JNE .loopFilaNegro
+
+    ; avanzar fila
+    DEC R10
+    CMP R10, 0
+    JNE .loopNewFilaNegro   
+
+    ; restauro RSI
+    MOV RSI, R13
+
+    ;; aplicacion del filtro
+    LEA RSI, [RSI + R9*8] ; avanzo 8 filas pintadas de negro.
+    LEA RDI, [RDI + R9*8] ; avanzo 8 filas pintadas de negro.
+    MOV R13, RDI; lo guardo para usarlo entre saltos de filas
+    MOV R12, RSI; lo guardo para usarlo entre saltos de filas
+
+    XOR R10, R10; para frenar iteracion en height
+    MOV R10, RCX;
+    SUB R10, 16; terminar en height - 16, 8 al principio, 8 al final...
+
+.loopNewRow:
+    ; inicio 8 pinta de negro y avanza hasta pixel 9
+    MOVDQU [RSI], XMM9
+    ADD RSI,16
+    ADD RDI,16
+    MOVDQU [RSI], XMM9
+    ADD RSI,16
+    ADD RDI,16
+
+    ; contador columnas (de a 4 pixeles)
+    MOV R11, RDX; width
+    SHR R11, 2
+    SUB R11, 4 ; terminar en width/4 - 4 (2 negro fin y principio)
+
+
+.loopRow:
+    ;;; aplico algoritmo a 4 pixeles
+
+    ; copiar pixeles
+    MOVDQU XMM1, [RDI + VERTICAL_OFFSET*R9 + HORIZONTAL_OFFSET] ; pixeles para extraer R y A
+    MOVDQU XMM2, [RDI + HORIZONTAL_OFFSET]                      ; pixeles para extraer G
+    MOVDQU XMM3, [RDI + VERTICAL_OFFSET*R9]                     ; pixeles para extraer B
+    
+    ; filtrar pixeles
+    PSRLD XMM1, 16          ; canales BGRA > RA00
+    PSLLD XMM1, 16          ; canales RA00 > 00RA
+
+    PSRLD XMM2, 8           ; canales BGRA > GRA0
+    PSLLD XMM2, 24          ; canales GRA0 > 000G
+    PSRLD XMM2, 16          ; canales 000G > 0G00
+
+    PSLLD XMM3, 24          ; canales BGRA > 000B
+    PSRLD XMM3, 24          ; canales 000B > B000
+
+    PADDUSB XMM1, XMM2
+    PADDUSB XMM1, XMM3
+
+    ; pego pixeles
+    MOVDQU [RSI], XMM1
+
+    ADD RDI, 16             ; siguientes 4 pixeles
+    ADD RSI, 16             ; siguientes 4 pixeles
+    DEC R11
+    CMP R11, 0
+    JNE .loopRow
+
+    ; fin 8 pinta de negro y avanza hasta pixel 9
+    MOVDQU [RSI], XMM9
+    ADD RSI,16
+    MOVDQU [RSI], XMM9
+
+.sigFila:
+    ADD R13, R9
+    MOV RDI, R13
+    ADD R12, R9
+    MOV RSI, R12
+    DEC R10
+    CMP R10, 0
+    JNE .loopNewRow
+
+    ;; pinta negro ultimas
+
+    MOV R10, 8; contador de filas
+
+.loopNewFilaNegro2:
+    MOV R11, RDX; contador de columnas (de a 4 pixeles)
+    SHR R11, 2; de a 4 pixeles
+    
+.loopFilaNegro2:
+    MOVDQU [RSI], XMM9
+
+    ; avanzar columna
+    ADD RSI, 16
+    DEC R11
+    CMP R11, 0
+    JNE .loopFilaNegro2
+
+    ; avanzar fila
+    DEC R10
+    CMP R10, 0
+    JNE .loopNewFilaNegro2  
+
+.fin:
+    POP R13
+    POP R12
+    RET
